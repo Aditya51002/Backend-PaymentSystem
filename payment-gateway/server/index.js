@@ -7,6 +7,7 @@ const webhookRoutes = require('./routes/webhook');
 const apiRateLimiter = require('./middleware/rateLimiter');
 const errorHandler = require('./middleware/errorHandler');
 const logger = require('./utils/logger');
+const retryQueue = require('./services/retryQueue');
 
 const app = express();
 
@@ -38,6 +39,7 @@ app.use(errorHandler);
 
 async function startServer() {
   await connectDB();
+  retryQueue.start();
   const port = Number(process.env.PORT || 5000);
   return app.listen(port, () => {
     logger.info('server.started', { port });

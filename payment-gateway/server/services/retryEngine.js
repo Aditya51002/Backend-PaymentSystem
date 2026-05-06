@@ -55,6 +55,127 @@ async function markPaymentFailed(paymentId, gatewayResponse) {
   );
 }
 
+async function runQueuedAttempt(payment, options = {}) {
+  const paymentId = payment.paymentId;
+  const maxRetries = Number(payment.maxRetries ?? process.env.MAX_RETRIES ?? 3);
+  const baseDelayMs = Number(options.baseDelayMs ?? getBaseDelayMs());
+  const gatewayCharge = options.gatewayCharge || gatewaySimulator.charge;
+  const retryCount = Number(payment.retryCount || 0);
+  const attempt = retryCount + 1;
+  const delayMs = attempt === 1 ? 0 : calculateBackoffDelay(retryCount, baseDelayMs);
+  const retryLog = await RetryLog.create({
+    paymentId,
+    attempt,
+    status: 'attempted',
+    delayMs,
+  });
+
+  logger.info('payment.processing', { paymentId, attempt });
+
+  await Payment.findOneAndUpdate(
+    { paymentId, status: 'processing' },
+    {
+      $set: {
+        lastAttemptAt: new Date(),
+        nextRetryAt: null,
+      },
+      $inc: { version: 1 },
+    },
+    { new: true }
+  );
+
+  try {
+    const gatewayResponse = await circuitBreaker.execute(async () => gatewayCharge(payment));
+    await RetryLog.updateOne(
+      { _id: retryLog._id },
+      {
+        $set: {
+          status: 'success',
+          error: null,
+        },
+      }
+    );
+    await markPaymentSuccess(paymentId, gatewayResponse);
+    logger.info('payment.success', { paymentId, gatewayRef: gatewayResponse.gatewayRef });
+    return { status: 'success', gatewayResponse };
+  } catch (error) {
+    const retryStatus = retryStatusFromError(error);
+    const gatewayResponse = error.gatewayResponse || {
+      status: 'failed',
+      error: error.message,
+      code: error.code,
+    };
+    const nextRetryCount = retryCount + 1;
+
+    await RetryLog.updateOne(
+      { _id: retryLog._id },
+      {
+        $set: {
+          status: retryStatus,
+          error: error.message,
+        },
+      }
+    );
+
+    if (nextRetryCount > maxRetries) {
+      await Payment.findOneAndUpdate(
+        { paymentId, status: 'processing' },
+        {
+          $set: {
+            status: 'failed',
+            gatewayResponse,
+            nextRetryAt: null,
+          },
+          $inc: {
+            retryCount: 1,
+            version: 1,
+          },
+        },
+        { new: true }
+      );
+      logger.error('payment.failed', {
+        paymentId,
+        totalAttempts: attempt,
+        error: error.message,
+      });
+      return { status: 'failed', error: error.message };
+    }
+
+    const nextDelayMs = calculateBackoffDelay(nextRetryCount, baseDelayMs);
+    const nextRetryAt = new Date(Date.now() + nextDelayMs);
+
+    await Payment.findOneAndUpdate(
+      { paymentId, status: 'processing' },
+      {
+        $set: {
+          status: 'pending',
+          gatewayResponse,
+          nextRetryAt,
+        },
+        $inc: {
+          retryCount: 1,
+          version: 1,
+        },
+      },
+      { new: true }
+    );
+
+    logger.warn('payment.retry', {
+      paymentId,
+      attempt: nextRetryCount + 1,
+      delay: nextDelayMs,
+      error: error.message,
+    });
+
+    return {
+      status: 'retry_scheduled',
+      error: error.message,
+      delayMs: nextDelayMs,
+      nextRetryAt,
+    };
+  }
+}
+
 async function run(payment, options = {}) {
   const paymentId = payment.paymentId;
   const maxRetries = Number(payment.maxRetries ?? process.env.MAX_RETRIES ?? 3);
@@ -176,5 +297,6 @@ async function run(payment, options = {}) {
 
 module.exports = {
   run,
+  runQueuedAttempt,
   calculateBackoffDelay,
 };

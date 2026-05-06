@@ -1,0 +1,251 @@
+openapi: 3.0.3
+info:
+  title: Payment Gateway API
+  version: 1.0.0
+  description: Payment initiation, status tracking, listing, and gateway webhook callbacks.
+servers:
+  - url: http://localhost:5000
+paths:
+  /health:
+    get:
+      summary: Health check
+      responses:
+        "200":
+          description: API is healthy
+  /api/payments:
+    post:
+      summary: Create a payment
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreatePaymentRequest"
+      responses:
+        "201":
+          description: Payment created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreatePaymentResponse"
+        "400":
+          description: Invalid input
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+    get:
+      summary: List payments
+      parameters:
+        - in: query
+          name: userId
+          schema:
+            type: string
+        - in: query
+          name: status
+          schema:
+            $ref: "#/components/schemas/PaymentStatus"
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 10
+      responses:
+        "200":
+          description: Payment list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListPaymentsResponse"
+  /api/payments/{paymentId}:
+    get:
+      summary: Get a payment by ID
+      parameters:
+        - in: path
+          name: paymentId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Payment found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GetPaymentResponse"
+        "404":
+          description: Payment not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorEnvelope"
+  /webhook:
+    post:
+      summary: Receive gateway webhook
+      description: Always returns HTTP 200, including unknown, duplicate, and conflicting callbacks.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookRequest"
+      responses:
+        "200":
+          description: Webhook accepted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WebhookResponse"
+components:
+  schemas:
+    PaymentStatus:
+      type: string
+      enum:
+        - pending
+        - processing
+        - success
+        - failed
+    CreatePaymentRequest:
+      type: object
+      required:
+        - amount
+        - userId
+      properties:
+        amount:
+          type: number
+          minimum: 0.01
+          example: 49.99
+        currency:
+          type: string
+          enum:
+            - USD
+            - EUR
+            - GBP
+            - INR
+          default: USD
+        userId:
+          type: string
+          example: user-123
+    Payment:
+      type: object
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/PaymentStatus"
+        amount:
+          type: number
+        currency:
+          type: string
+        retryCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    CreatePaymentResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            paymentId:
+              type: string
+              format: uuid
+            status:
+              type: string
+              example: pending
+            createdAt:
+              type: string
+              format: date-time
+    GetPaymentResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          $ref: "#/components/schemas/Payment"
+    ListPaymentsResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            payments:
+              type: array
+              items:
+                $ref: "#/components/schemas/Payment"
+            total:
+              type: integer
+            page:
+              type: integer
+            limit:
+              type: integer
+    WebhookRequest:
+      type: object
+      required:
+        - paymentId
+        - status
+        - gatewayRef
+        - timestamp
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum:
+            - success
+            - failed
+        gatewayRef:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+    WebhookResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        data:
+          type: object
+          properties:
+            received:
+              type: boolean
+              example: true
+    ErrorEnvelope:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        error:
+          type: string
+        code:
+          type: string

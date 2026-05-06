@@ -3,6 +3,7 @@ const { v4: uuidv4 } = require('uuid');
 const Payment = require('../models/Payment');
 const IdempotencyKey = require('../models/IdempotencyKey');
 const retryEngine = require('./retryEngine');
+const retryQueue = require('./retryQueue');
 const logger = require('../utils/logger');
 
 const VALID_CURRENCIES = ['USD', 'EUR', 'GBP', 'INR'];
@@ -129,7 +130,7 @@ async function initiatePayment(input, idempotencyKey, options = {}) {
     if (shouldAutoProcess(options)) {
       setImmediate(async () => {
         try {
-          await processPayment(payment.paymentId, payment.version);
+          await retryQueue.enqueuePayment(payment.paymentId, 0);
         } catch (error) {
           logger.error('payment.async_processing_error', {
             paymentId: payment.paymentId,
