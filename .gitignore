@@ -1,0 +1,66 @@
+# Dependencies
+node_modules/
+payment-gateway/node_modules/
+payment-gateway/client/node_modules/
+
+# Environment files
+.env
+.env.*
+!.env.example
+payment-gateway/.env
+payment-gateway/.env.*
+!payment-gateway/.env.example
+payment-gateway/client/.env
+payment-gateway/client/.env.*
+!payment-gateway/client/.env.example
+
+# Build output
+dist/
+build/
+payment-gateway/client/dist/
+payment-gateway/client/build/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+payment-gateway/logs/
+
+# Test and coverage output
+coverage/
+.nyc_output/
+payment-gateway/coverage/
+payment-gateway/.nyc_output/
+
+# Runtime and cache files
+.cache/
+.vite/
+.eslintcache
+payment-gateway/.cache/
+payment-gateway/client/.vite/
+
+# Database dumps and local data
+*.dump
+*.archive
+*.bson
+*.wt
+dump/
+data/
+payment-gateway/dump/
+payment-gateway/data/
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+Desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Process files
+*.pid
+*.seed
