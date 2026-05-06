@@ -48,21 +48,109 @@ async function fetchCachedResponse(idempotencyKey) {
   return IdempotencyKey.findOne({ key: idempotencyKey }).lean();
 }
 
-async function initiatePayment(input, idempotencyKey, options = {}) {
-  if (!idempotencyKey) {
-    throw createHttpError('Idempotency-Key header is required', 400, 'IDEMPOTENCY_KEY_REQUIRED');
+function buildPaymentResponse(payment) {
+  return {
+    paymentId: payment.paymentId,
+    status: payment.status,
+    createdAt: payment.createdAt,
+  };
+}
+
+function isStandaloneTransactionError(error) {
+  return error
+    && typeof error.message === 'string'
+    && error.message.includes('Transaction numbers are only allowed on a replica set member or mongos');
+}
+
+async function cacheResponse(idempotencyKey, paymentId, response) {
+  try {
+    await IdempotencyKey.updateOne(
+      { key: idempotencyKey },
+      {
+        $setOnInsert: {
+          key: idempotencyKey,
+          paymentId,
+          response,
+        },
+      },
+      { upsert: true }
+    );
+  } catch (error) {
+    if (!error || error.code !== 11000) {
+      throw error;
+    }
+  }
+}
+
+async function fetchExistingPaymentResponse(idempotencyKey) {
+  const existingPayment = await Payment.findOne({ idempotencyKey }).lean();
+
+  if (!existingPayment) {
+    return null;
   }
 
-  const validated = validatePaymentInput(input);
-  const existing = await fetchCachedResponse(idempotencyKey);
+  const response = buildPaymentResponse(existingPayment);
+  await cacheResponse(idempotencyKey, existingPayment.paymentId, response);
 
-  if (existing) {
+  return response;
+}
+
+async function createPaymentWithoutTransaction(validated, idempotencyKey) {
+  const existingPaymentResponse = await fetchExistingPaymentResponse(idempotencyKey);
+
+  if (existingPaymentResponse) {
     return {
-      response: existing.response,
+      response: existingPaymentResponse,
+      payment: null,
       cached: true,
     };
   }
 
+  try {
+    const payment = await Payment.create({
+      paymentId: uuidv4(),
+      idempotencyKey,
+      amount: validated.amount,
+      currency: validated.currency,
+      userId: validated.userId,
+      status: 'pending',
+      maxRetries: Number(process.env.MAX_RETRIES || 3),
+    });
+
+    const response = buildPaymentResponse(payment);
+    await cacheResponse(idempotencyKey, payment.paymentId, response);
+
+    return {
+      response,
+      payment,
+      cached: false,
+    };
+  } catch (error) {
+    if (error && error.code === 11000) {
+      const duplicate = await fetchCachedResponse(idempotencyKey);
+      if (duplicate) {
+        return {
+          response: duplicate.response,
+          payment: null,
+          cached: true,
+        };
+      }
+
+      const duplicatePaymentResponse = await fetchExistingPaymentResponse(idempotencyKey);
+      if (duplicatePaymentResponse) {
+        return {
+          response: duplicatePaymentResponse,
+          payment: null,
+          cached: true,
+        };
+      }
+    }
+
+    throw error;
+  }
+}
+
+async function createPaymentWithTransaction(validated, idempotencyKey) {
   const session = await mongoose.startSession();
 
   try {
@@ -79,11 +167,10 @@ async function initiatePayment(input, idempotencyKey, options = {}) {
         return;
       }
 
-      const paymentId = uuidv4();
       const [createdPayment] = await Payment.create(
         [
           {
-            paymentId,
+            paymentId: uuidv4(),
             idempotencyKey,
             amount: validated.amount,
             currency: validated.currency,
@@ -96,11 +183,7 @@ async function initiatePayment(input, idempotencyKey, options = {}) {
       );
 
       payment = createdPayment;
-      response = {
-        paymentId: createdPayment.paymentId,
-        status: 'pending',
-        createdAt: createdPayment.createdAt,
-      };
+      response = buildPaymentResponse(createdPayment);
 
       await IdempotencyKey.create(
         [
@@ -114,26 +197,67 @@ async function initiatePayment(input, idempotencyKey, options = {}) {
       );
     });
 
-    if (!payment) {
+    return {
+      response,
+      payment,
+      cached: !payment,
+    };
+  } finally {
+    await session.endSession();
+  }
+}
+
+async function initiatePayment(input, idempotencyKey, options = {}) {
+  if (!idempotencyKey) {
+    throw createHttpError('Idempotency-Key header is required', 400, 'IDEMPOTENCY_KEY_REQUIRED');
+  }
+
+  const validated = validatePaymentInput(input);
+  const existing = await fetchCachedResponse(idempotencyKey);
+
+  if (existing) {
+    return {
+      response: existing.response,
+      cached: true,
+    };
+  }
+
+  try {
+    let result;
+
+    try {
+      result = await createPaymentWithTransaction(validated, idempotencyKey);
+    } catch (error) {
+      if (!isStandaloneTransactionError(error)) {
+        throw error;
+      }
+
+      logger.warn('payment.transaction_unavailable_using_fallback', {
+        reason: error.message,
+      });
+      result = await createPaymentWithoutTransaction(validated, idempotencyKey);
+    }
+
+    if (result.cached) {
       return {
-        response,
+        response: result.response,
         cached: true,
       };
     }
 
     logger.info('payment.created', {
-      paymentId: payment.paymentId,
-      amount: payment.amount,
-      currency: payment.currency,
+      paymentId: result.payment.paymentId,
+      amount: result.payment.amount,
+      currency: result.payment.currency,
     });
 
     if (shouldAutoProcess(options)) {
       setImmediate(async () => {
         try {
-          await retryQueue.enqueuePayment(payment.paymentId, 0);
+          await retryQueue.enqueuePayment(result.payment.paymentId, 0);
         } catch (error) {
           logger.error('payment.async_processing_error', {
-            paymentId: payment.paymentId,
+            paymentId: result.payment.paymentId,
             error: error.message,
             stack: error.stack,
           });
@@ -142,7 +266,7 @@ async function initiatePayment(input, idempotencyKey, options = {}) {
     }
 
     return {
-      response,
+      response: result.response,
       cached: false,
     };
   } catch (error) {
@@ -156,8 +280,6 @@ async function initiatePayment(input, idempotencyKey, options = {}) {
       }
     }
     throw error;
-  } finally {
-    await session.endSession();
   }
 }
 
